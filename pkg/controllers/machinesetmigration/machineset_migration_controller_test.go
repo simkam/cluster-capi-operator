@@ -193,6 +193,85 @@ var _ = Describe("With a running MachineSetMigration controller", func() {
 			})
 		})
 
+		Context("when status.AuthoritativeAPI is empty and a non-paused Cluster API machine set exists", func() {
+			BeforeEach(func() {
+				By("Creating a standalone (non-paused) Cluster API machine set")
+
+				capiMachineSet = capiMachineSetBuilder.Build()
+				Eventually(k8sClient.Create(ctx, capiMachineSet)).Should(Succeed())
+
+				By("Creating a MAPI machine set with spec.authoritativeAPI=MachineAPI and empty status")
+
+				mapiMachineSet = mapiMachineSetBuilder.
+					WithAuthoritativeAPI(mapiv1beta1.MachineAuthorityMachineAPI).
+					Build()
+				Eventually(k8sClient.Create(ctx, mapiMachineSet)).Should(Succeed())
+
+				By("Leaving the MAPI machine set status AuthoritativeAPI empty")
+
+				req = reconcile.Request{NamespacedName: client.ObjectKeyFromObject(mapiMachineSet)}
+			})
+
+			It("should correct spec.authoritativeAPI to ClusterAPI to preserve the standalone Cluster API machine set", func() {
+				By("Running one reconciliation")
+
+				_, err := reconciler.Reconcile(ctx, req)
+				Expect(err).NotTo(HaveOccurred(), "reconciler should not have errored")
+
+				By("Verifying spec.authoritativeAPI was corrected to ClusterAPI")
+
+				updatedMS := &mapiv1beta1.MachineSet{}
+				Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(mapiMachineSet), updatedMS)).To(Succeed())
+				Expect(updatedMS.Spec.AuthoritativeAPI).To(Equal(mapiv1beta1.MachineAuthorityClusterAPI))
+
+				By("Verifying status.authoritativeAPI is still empty (status patched on next reconcile)")
+				Expect(updatedMS.Status.AuthoritativeAPI).To(BeEmpty())
+
+				By("Verifying the Cluster API machine set was not modified")
+
+				updatedCAPIMS := &clusterv1.MachineSet{}
+				Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(capiMachineSet), updatedCAPIMS)).To(Succeed())
+				Expect(updatedCAPIMS.ResourceVersion).To(Equal(capiMachineSet.ResourceVersion))
+			})
+		})
+
+		Context("when status.AuthoritativeAPI is empty and a paused Cluster API machine set exists", func() {
+			BeforeEach(func() {
+				By("Creating a paused (mirror) Cluster API machine set")
+
+				capiMachineSetPaused := capiMachineSetBuilder.
+					WithAnnotations(map[string]string{clusterv1.PausedAnnotation: ""}).
+					Build()
+				Eventually(k8sClient.Create(ctx, capiMachineSetPaused)).Should(Succeed())
+				capiMachineSet = capiMachineSetPaused
+
+				By("Creating a MAPI machine set with spec.authoritativeAPI=MachineAPI and empty status")
+
+				mapiMachineSet = mapiMachineSetBuilder.
+					WithAuthoritativeAPI(mapiv1beta1.MachineAuthorityMachineAPI).
+					Build()
+				Eventually(k8sClient.Create(ctx, mapiMachineSet)).Should(Succeed())
+
+				By("Leaving the MAPI machine set status AuthoritativeAPI empty")
+
+				req = reconcile.Request{NamespacedName: client.ObjectKeyFromObject(mapiMachineSet)}
+			})
+
+			It("should perform normal bootstrap and set status.authoritativeAPI to MachineAPI", func() {
+				By("Running one reconciliation")
+
+				_, err := reconciler.Reconcile(ctx, req)
+				Expect(err).NotTo(HaveOccurred(), "reconciler should not have errored")
+
+				By("Verifying status.authoritativeAPI was set to MachineAPI (guard did not fire)")
+
+				updatedMS := &mapiv1beta1.MachineSet{}
+				Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(mapiMachineSet), updatedMS)).To(Succeed())
+				Expect(updatedMS.Status.AuthoritativeAPI).To(Equal(mapiv1beta1.MachineAuthorityMachineAPI))
+				Expect(updatedMS.Spec.AuthoritativeAPI).To(Equal(mapiv1beta1.MachineAuthorityMachineAPI))
+			})
+		})
+
 		Context("when the Synchronized condition is not True", func() {
 			BeforeEach(func() {
 				By("Setting the MAPI machine set spec AuthoritativeAPI to ClusterAPI")

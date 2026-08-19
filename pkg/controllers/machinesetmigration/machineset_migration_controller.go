@@ -127,6 +127,15 @@ func (r *MachineSetMigrationReconciler) Reconcile(ctx context.Context, req recon
 	// as such if any change is done to this logic, please consider changing it also there. See:
 	// https://github.com/openshift/machine-api-operator/pull/1386/files#diff-3a93acbdaa255c0afa7f52535fc7df9c3890d6403035dd4c3bd47b0092eb3a37R177-R194
 	if mapiMachineSet.Status.AuthoritativeAPI == "" {
+		corrected, err := r.correctAuthoritativeAPIForStandaloneCAPIMachineSet(ctx, logger, mapiMachineSet)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+
+		if corrected {
+			return ctrl.Result{}, nil
+		}
+
 		if err := r.applyStatusAuthoritativeAPIWithPatch(ctx, mapiMachineSet, mapiMachineSet.Spec.AuthoritativeAPI); err != nil {
 			return ctrl.Result{}, fmt.Errorf("unable to apply authoritativeAPI to status with patch: %w", err)
 		}
@@ -349,4 +358,44 @@ func (r *MachineSetMigrationReconciler) isSynchronized(ctx context.Context, mapi
 // applyStatusAuthoritativeAPIWithPatch updates the resource status.authoritativeAPI using a server-side apply patch.
 func (r *MachineSetMigrationReconciler) applyStatusAuthoritativeAPIWithPatch(ctx context.Context, ms *mapiv1beta1.MachineSet, authority mapiv1beta1.MachineAuthority) error {
 	return synccommon.ApplyAuthoritativeAPI[*machinev1applyconfigs.MachineSetStatusApplyConfiguration](ctx, r.Client, controllerName, machinev1applyconfigs.MachineSet, ms, authority)
+}
+
+// correctAuthoritativeAPIForStandaloneCAPIMachineSet detects the race condition where a standalone
+// (non-paused) Cluster API machine set exists while the Machine API machine set defaults to MachineAPI
+// authority. When detected, it corrects spec.authoritativeAPI to ClusterAPI and returns true.
+// A mirror Cluster API machine set created by the sync controller always has the paused annotation,
+// so its absence indicates a standalone machine set.
+func (r *MachineSetMigrationReconciler) correctAuthoritativeAPIForStandaloneCAPIMachineSet(ctx context.Context, logger logr.Logger, mapiMachineSet *mapiv1beta1.MachineSet) (bool, error) {
+	if mapiMachineSet.Spec.AuthoritativeAPI == mapiv1beta1.MachineAuthorityClusterAPI {
+		return false, nil
+	}
+
+	capiMachineSet := &clusterv1.MachineSet{}
+	if err := r.Get(ctx, client.ObjectKey{Namespace: r.CAPINamespace, Name: mapiMachineSet.Name}, capiMachineSet); err != nil {
+		if apierrors.IsNotFound(err) {
+			return false, nil
+		}
+
+		return false, fmt.Errorf("failed to get Cluster API machine set for race condition check: %w", err)
+	}
+
+	if annotations.HasPaused(capiMachineSet) {
+		return false, nil
+	}
+
+	logger.Info("Detected race condition: standalone Cluster API machine set exists while Machine API machine set defaults to MachineAPI authority, correcting spec.authoritativeAPI to ClusterAPI")
+
+	if r.Recorder != nil {
+		r.Recorder.Event(mapiMachineSet, corev1.EventTypeWarning, "AuthoritativeAPIConflict",
+			"Standalone Cluster API machine set already exists. Correcting spec.authoritativeAPI to ClusterAPI")
+	}
+
+	mapiMachineSetCopy := mapiMachineSet.DeepCopy()
+	mapiMachineSet.Spec.AuthoritativeAPI = mapiv1beta1.MachineAuthorityClusterAPI
+
+	if err := r.Patch(ctx, mapiMachineSet, client.MergeFrom(mapiMachineSetCopy)); err != nil {
+		return false, fmt.Errorf("failed to correct spec.authoritativeAPI to ClusterAPI: %w", err)
+	}
+
+	return true, nil
 }

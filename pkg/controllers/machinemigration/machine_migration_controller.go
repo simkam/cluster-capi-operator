@@ -128,6 +128,15 @@ func (r *MachineMigrationReconciler) Reconcile(ctx context.Context, req reconcil
 	// as such if any change is done to this logic, please consider changing it also there. See:
 	// https://github.com/openshift/machine-api-operator/pull/1386/files#diff-8a4a734efbb8fef769f9f6ba5d30d94f19433a0b1eaeb1be4f2a55aa226c3b3dR180-R197
 	if mapiMachine.Status.AuthoritativeAPI == "" {
+		corrected, err := r.correctAuthoritativeAPIForStandaloneCAPIMachine(ctx, logger, mapiMachine)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+
+		if corrected {
+			return ctrl.Result{}, nil
+		}
+
 		if err := r.applyStatusAuthoritativeAPIWithPatch(ctx, mapiMachine, mapiMachine.Spec.AuthoritativeAPI); err != nil {
 			return ctrl.Result{}, fmt.Errorf("unable to apply authoritativeAPI to status with patch: %w", err)
 		}
@@ -393,4 +402,44 @@ func (r *MachineMigrationReconciler) isSynchronized(ctx context.Context, mapiMac
 // applyStatusAuthoritativeAPIWithPatch updates the resource status.authoritativeAPI using a server-side apply patch.
 func (r *MachineMigrationReconciler) applyStatusAuthoritativeAPIWithPatch(ctx context.Context, m *mapiv1beta1.Machine, authority mapiv1beta1.MachineAuthority) error {
 	return synccommon.ApplyAuthoritativeAPI[*machinev1applyconfigs.MachineStatusApplyConfiguration](ctx, r.Client, controllerName, machinev1applyconfigs.Machine, m, authority)
+}
+
+// correctAuthoritativeAPIForStandaloneCAPIMachine detects the race condition where a standalone
+// (non-paused) Cluster API machine exists while the Machine API machine defaults to MachineAPI
+// authority. When detected, it corrects spec.authoritativeAPI to ClusterAPI and returns true.
+// A mirror Cluster API machine created by the sync controller always has the paused annotation,
+// so its absence indicates a standalone machine.
+func (r *MachineMigrationReconciler) correctAuthoritativeAPIForStandaloneCAPIMachine(ctx context.Context, logger logr.Logger, mapiMachine *mapiv1beta1.Machine) (bool, error) {
+	if mapiMachine.Spec.AuthoritativeAPI == mapiv1beta1.MachineAuthorityClusterAPI {
+		return false, nil
+	}
+
+	capiMachine := &clusterv1.Machine{}
+	if err := r.Get(ctx, client.ObjectKey{Namespace: r.CAPINamespace, Name: mapiMachine.Name}, capiMachine); err != nil {
+		if apierrors.IsNotFound(err) {
+			return false, nil
+		}
+
+		return false, fmt.Errorf("failed to get Cluster API machine for race condition check: %w", err)
+	}
+
+	if annotations.HasPaused(capiMachine) {
+		return false, nil
+	}
+
+	logger.Info("Detected race condition: standalone Cluster API machine exists while Machine API machine defaults to MachineAPI authority, correcting spec.authoritativeAPI to ClusterAPI")
+
+	if r.Recorder != nil {
+		r.Recorder.Event(mapiMachine, corev1.EventTypeWarning, "AuthoritativeAPIConflict",
+			"Standalone Cluster API machine already exists. Correcting spec.authoritativeAPI to ClusterAPI")
+	}
+
+	mapiMachineCopy := mapiMachine.DeepCopy()
+	mapiMachine.Spec.AuthoritativeAPI = mapiv1beta1.MachineAuthorityClusterAPI
+
+	if err := r.Patch(ctx, mapiMachine, client.MergeFrom(mapiMachineCopy)); err != nil {
+		return false, fmt.Errorf("failed to correct spec.authoritativeAPI to ClusterAPI: %w", err)
+	}
+
+	return true, nil
 }

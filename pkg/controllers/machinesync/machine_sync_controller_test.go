@@ -742,6 +742,39 @@ var _ = Describe("With a running MachineSync Reconciler", func() {
 		})
 	})
 
+	Context("when the MAPI machine claims MachineAPI authority but a standalone (non-paused) Cluster API machine exists", func() {
+		BeforeEach(func() {
+			By("Creating a standalone (non-paused) Cluster API machine")
+
+			capiMachine = capiMachineBuilder.Build()
+			Eventually(k8sClient.Create(ctx, capiMachine)).Should(Succeed(), "capi machine should be able to be created")
+
+			By("Creating a MAPI machine with spec and status authoritativeAPI=MachineAPI")
+
+			mapiMachine = mapiMachineBuilder.
+				WithAuthoritativeAPI(mapiv1beta1.MachineAuthorityMachineAPI).
+				Build()
+			Eventually(k8sClient.Create(ctx, mapiMachine)).Should(Succeed(), "mapi machine should be able to be created")
+
+			By("Setting the status.authoritativeAPI to MachineAPI")
+			Eventually(k.UpdateStatus(mapiMachine, func() {
+				mapiMachine.Status.AuthoritativeAPI = mapiv1beta1.MachineAuthorityMachineAPI
+			})).Should(Succeed())
+		})
+
+		It("should correct spec.authoritativeAPI to ClusterAPI", func() {
+			Eventually(k.Object(mapiMachine), timeout).Should(
+				HaveField("Spec.AuthoritativeAPI", Equal(mapiv1beta1.MachineAuthorityClusterAPI)),
+			)
+		})
+
+		It("should not add the paused annotation to the Cluster API machine", func() {
+			Consistently(k.Object(capiMachine), consistentlyTimeout).ShouldNot(
+				HaveField("ObjectMeta.Annotations", HaveKey(clusterv1.PausedAnnotation)),
+			)
+		})
+	})
+
 	Context("when the MAPI machine has status.authoritativeAPI set to Migrating", func() {
 		BeforeEach(func() {
 			By("Creating the CAPI and MAPI machines")

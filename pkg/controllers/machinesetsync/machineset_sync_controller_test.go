@@ -1090,6 +1090,39 @@ var _ = Describe("With a running MachineSetSync controller", func() {
 		})
 	})
 
+	Context("when the MAPI machine set claims MachineAPI authority but a standalone (non-paused) Cluster API machine set exists", func() {
+		BeforeEach(func() {
+			By("Creating a standalone (non-paused) Cluster API machine set")
+
+			capiMachineSet = capiMachineSetBuilder.Build()
+			Eventually(kCreate(ctx, capiMachineSet)).Should(Succeed())
+
+			By("Creating a MAPI machine set with spec and status authoritativeAPI=MachineAPI")
+
+			mapiMachineSet = mapiMachineSetBuilder.
+				WithAuthoritativeAPI(mapiv1beta1.MachineAuthorityMachineAPI).
+				Build()
+			Eventually(kCreate(ctx, mapiMachineSet)).Should(Succeed())
+
+			By("Setting the status.authoritativeAPI to MachineAPI")
+			Eventually(k.UpdateStatus(mapiMachineSet, func() {
+				mapiMachineSet.Status.AuthoritativeAPI = mapiv1beta1.MachineAuthorityMachineAPI
+			})).Should(Succeed())
+		})
+
+		It("should correct spec.authoritativeAPI to ClusterAPI", func() {
+			Eventually(k.Object(mapiMachineSet), timeout).Should(
+				HaveField("Spec.AuthoritativeAPI", Equal(mapiv1beta1.MachineAuthorityClusterAPI)),
+			)
+		})
+
+		It("should not add the paused annotation to the Cluster API machine set", func() {
+			Consistently(k.Object(capiMachineSet), timeout).ShouldNot(
+				HaveField("ObjectMeta.Annotations", HaveKey(clusterv1.PausedAnnotation)),
+			)
+		})
+	})
+
 	Context("when the MAPI machine set has MachineAuthority set to Migrating", func() {
 		BeforeEach(func() {
 			By("Creating the CAPI and MAPI machine sets")
