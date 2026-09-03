@@ -443,6 +443,60 @@ func updateCAPIMachineSetInfraTemplate(capiMachineSet *clusterv1.MachineSet, new
 	)
 }
 
+// createMAPIMachineSetWithPublicIP creates a MAPI MachineSet configured with publicIP=true
+// and a subnet filter targeting a public subnet in the given availability zone.
+// The MachineSet is created with MAPI authority and 0 replicas.
+func createMAPIMachineSetWithPublicIP(ctx context.Context, cl client.Client, machineSetName, availabilityZone string) *mapiv1beta1.MachineSet {
+	GinkgoHelper()
+
+	By(fmt.Sprintf("Creating MAPI MachineSet %s with publicIP=true in AZ %s", machineSetName, availabilityZone))
+
+	machineSetParams := mapiframework.BuildMachineSetParams(ctx, cl, 0)
+	machineSetParams.Name = machineSetName
+	machineSetParams.Labels[mapiframework.MachineSetKey] = machineSetName
+	machineSetParams.MachinesetAuthoritativeAPI = mapiv1beta1.MachineAuthorityMachineAPI
+	machineSetParams.MachineAuthoritativeAPI = mapiv1beta1.MachineAuthorityMachineAPI
+	machineSetParams.Taints = []corev1.Taint{}
+
+	providerSpec := &mapiv1beta1.AWSMachineProviderConfig{}
+	Expect(yaml.Unmarshal(machineSetParams.ProviderSpec.Value.Raw, providerSpec)).To(Succeed(),
+		"should not fail unmarshaling provider spec for MachineSet %s", machineSetName)
+
+	publicIP := true
+	providerSpec.PublicIP = &publicIP
+	providerSpec.Subnet = mapiv1beta1.AWSResourceReference{
+		Filters: []mapiv1beta1.Filter{
+			{
+				Name:   "tag:Name",
+				Values: []string{fmt.Sprintf("%s-subnet-public-%s", clusterName, availabilityZone)},
+			},
+		},
+	}
+	providerSpec.Placement.AvailabilityZone = availabilityZone
+
+	rawProviderSpec, err := json.Marshal(providerSpec)
+	Expect(err).ToNot(HaveOccurred(), "should not fail marshaling updated provider spec for MachineSet %s", machineSetName)
+	machineSetParams.ProviderSpec.Value.Raw = rawProviderSpec
+
+	mapiMachineSet, err := mapiframework.CreateMachineSet(cl, machineSetParams)
+	Expect(err).ToNot(HaveOccurred(), "MAPI MachineSet %s creation should succeed", machineSetName)
+
+	trackResource(mapiMachineSet)
+
+	capiMachineSet := &clusterv1.MachineSet{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      machineSetName,
+			Namespace: capiframework.CAPINamespace,
+		},
+	}
+	Eventually(komega.Get(capiMachineSet), capiframework.WaitShort, capiframework.RetryShort).Should(
+		Succeed(), "Should have mirror CAPI MachineSet created within 1 minute")
+
+	trackResource(capiMachineSet)
+
+	return mapiMachineSet
+}
+
 // cleanupMachineSetTestResources deletes MAPI MachineSets, CAPI MachineSets, and AWSMachineTemplates created during tests.
 func cleanupMachineSetTestResources(ctx context.Context, cl client.Client, capiMachineSets []*clusterv1.MachineSet, awsMachineTemplates []*awsv1.AWSMachineTemplate, mapiMachineSets []*mapiv1beta1.MachineSet) {
 	GinkgoHelper()

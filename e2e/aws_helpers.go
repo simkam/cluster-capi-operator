@@ -255,6 +255,50 @@ func deleteAWSMachineTemplates(ctx context.Context, cl client.Client, templates 
 	}
 }
 
+// getPublicSubnetForCluster discovers a public subnet in the cluster VPC.
+// It first tries the IPI naming convention (tag:Name matching <infraName>-subnet-public-*),
+// then falls back to the kubernetes.io/role/elb=1 tag.
+// Returns empty strings if no public subnet is found.
+func getPublicSubnetForCluster(awsClient *ec2.EC2, infraName string) (subnetID, availabilityZone string) {
+	GinkgoHelper()
+
+	// Primary: IPI naming convention
+	result, err := awsClient.DescribeSubnets(&ec2.DescribeSubnetsInput{
+		Filters: []*ec2.Filter{
+			{
+				Name:   aws.String("tag:Name"),
+				Values: []*string{aws.String(fmt.Sprintf("%s-subnet-public-*", infraName))},
+			},
+		},
+	})
+	Expect(err).ToNot(HaveOccurred(), "should not fail describing subnets by IPI naming convention")
+
+	if len(result.Subnets) > 0 {
+		return aws.StringValue(result.Subnets[0].SubnetId), aws.StringValue(result.Subnets[0].AvailabilityZone)
+	}
+
+	// Fallback: kubernetes.io/role/elb tag
+	result, err = awsClient.DescribeSubnets(&ec2.DescribeSubnetsInput{
+		Filters: []*ec2.Filter{
+			{
+				Name:   aws.String(fmt.Sprintf("tag:kubernetes.io/cluster/%s", infraName)),
+				Values: []*string{aws.String("owned"), aws.String("shared")},
+			},
+			{
+				Name:   aws.String("tag:kubernetes.io/role/elb"),
+				Values: []*string{aws.String("1")},
+			},
+		},
+	})
+	Expect(err).ToNot(HaveOccurred(), "should not fail describing subnets by kubernetes.io/role/elb tag")
+
+	if len(result.Subnets) > 0 {
+		return aws.StringValue(result.Subnets[0].SubnetId), aws.StringValue(result.Subnets[0].AvailabilityZone)
+	}
+
+	return "", ""
+}
+
 // getAWSMachineTemplateByPrefix gets an AWSMachineTemplate by name prefix.
 func getAWSMachineTemplateByPrefix(prefix string, namespace string) (*awsv1.AWSMachineTemplate, error) {
 	if prefix == "" {
